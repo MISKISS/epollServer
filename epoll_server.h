@@ -1,4 +1,5 @@
 #pragma once
+#include"ThreadPool.h"
 class epollServer
 {
     public:
@@ -7,6 +8,7 @@ class epollServer
         bool start();
 
     private:
+        ThreadPool m_pool;
         bool init();
         void eventLoop();
         bool acceptClient();

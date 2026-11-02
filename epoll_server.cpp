@@ -4,7 +4,7 @@
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <sys/epoll.h>
-epollServer::epollServer(int port): m_port(port), m_lfd(-1), m_epfd(-1)
+epollServer::epollServer(int port):m_port(port),m_pool(3,10),m_lfd(-1),m_epfd(-1)
 {
 
 }
@@ -68,17 +68,23 @@ void epollServer::eventLoop()
                 int nfd = event[i].data.fd;
                 if(nfd==m_lfd)
                 {
-                    if(acceptClient()==-1)
+                    if (!acceptClient()) 
                     {
-                        std::cout << "acceptClient() error!" << std::endl;
+                        std::cout << "acceptClient is error!" << std::endl;
                     }
                 }
                 else
                 {
-                    if(!handClient(event[i].data.fd))
-                    {
-                        continue;
-                    }
+                     epoll_ctl(
+                        m_epfd,
+                        EPOLL_CTL_DEL,
+                        nfd,
+                        nullptr
+                    );
+                    m_pool.addTask([this, nfd]()
+                    { 
+                    this->handClient(nfd); 
+                    });
                 }
             }
         }
@@ -134,7 +140,21 @@ bool epollServer::handClient(int fd)
             perror("send");
             return false;
         }
-       
+        epoll_event ev{};
+    ev.events = EPOLLIN;
+    ev.data.fd = fd;
+
+    if(epoll_ctl(
+        m_epfd,
+        EPOLL_CTL_ADD,
+        fd,
+        &ev
+    ) == -1)
+    {
+        perror("epoll_ctl ADD");
+        close(fd);
+        return false;
+    }
     }
     return true;
 }
