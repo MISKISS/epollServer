@@ -4,6 +4,9 @@
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <sys/epoll.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <cerrno>
 epollServer::epollServer(int port):m_port(port),m_pool(3,10),m_lfd(-1),m_epfd(-1)
 {
 
@@ -75,12 +78,6 @@ void epollServer::eventLoop()
                 }
                 else
                 {
-                     epoll_ctl(
-                        m_epfd,
-                        EPOLL_CTL_DEL,
-                        nfd,
-                        nullptr
-                    );
                     m_pool.addTask([this, nfd]()
                     { 
                     this->handClient(nfd); 
@@ -106,10 +103,21 @@ bool epollServer::acceptClient()
         perror("accpet");
         return false;
     }
+    if(!setNonBlocking(cfd))
+    {
+        perror("setNonBlocking");
+        close(cfd);
+        return false;
+    }
     epoll_event nev;
     nev.data.fd = cfd;
-    nev.events = EPOLLIN;
-    epoll_ctl(m_epfd, EPOLL_CTL_ADD, cfd, &nev);
+    nev.events = EPOLLIN | EPOLLONESHOT;
+    if (epoll_ctl(m_epfd, EPOLL_CTL_ADD, cfd, &nev) == -1)
+    {
+       perror("epoll_ctl ADD");
+        close(cfd);
+        return false;
+    }
     std::cout << "客户端连接成功，cfd= " << cfd << std::endl;
     return true;
 }
@@ -117,14 +125,8 @@ bool epollServer::handClient(int fd)
 {
     char buf[1024];
     int lens = recv(fd, buf, 1024, 0);
-    if (lens == -1)
-    {
-        perror("recv");
-        epoll_ctl(m_epfd, EPOLL_CTL_DEL, fd, nullptr);
-        close(fd);
-        return false;
-    }
-    else if(lens==0)
+    
+    if(lens==0)
     {
         std::cout << "客户端断开了连接！" << std::endl;
         epoll_ctl(m_epfd, EPOLL_CTL_DEL, fd, nullptr);
@@ -140,21 +142,47 @@ bool epollServer::handClient(int fd)
             perror("send");
             return false;
         }
-        epoll_event ev{};
-    ev.events = EPOLLIN;
+    }
+    else
+    {
+        if (errno == EAGAIN ||errno == EWOULDBLOCK)
+        {
+            // 目前没有更多数据
+        }
+        else if (errno == EINTR)
+        {
+            // 被信号中断，本次先重新激活，稍后再尝试
+        }
+        else 
+        {
+            // 其他错误
+            perror("recv");
+            epoll_ctl(m_epfd, EPOLL_CTL_DEL, fd, nullptr);
+            close(fd);
+            return false;
+        }
+    }
+    epoll_event ev{};
+    ev.events = EPOLLIN | EPOLLONESHOT;
     ev.data.fd = fd;
 
-    if(epoll_ctl(
-        m_epfd,
-        EPOLL_CTL_ADD,
-        fd,
-        &ev
-    ) == -1)
+    if (epoll_ctl(m_epfd, EPOLL_CTL_MOD, fd, &ev) == -1)
     {
-        perror("epoll_ctl ADD");
+        perror("epoll_ctl MOD");
         close(fd);
+       return false;
+    }
+    return true;
+}
+bool epollServer::setNonBlocking(int fd)
+{
+    int flags = fcntl(fd, F_GETFL, 0);
+
+    if (flags == -1)
         return false;
-    }
-    }
+
+    if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) == -1)
+        return false;
+
     return true;
 }

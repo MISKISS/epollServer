@@ -1,5 +1,6 @@
 #pragma once
 #include"ThreadPool.h"
+
 class epollServer
 {
     public:
@@ -13,6 +14,7 @@ class epollServer
         void eventLoop();
         bool acceptClient();
         bool handClient(int fd);
+        bool setNonBlocking(int fd);
         int m_port;
         int m_lfd;
         int m_epfd;
