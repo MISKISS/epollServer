@@ -69,6 +69,7 @@ void epollServer::eventLoop()
             for (int i = 0; i < num;++i)
             {
                 int nfd = event[i].data.fd;
+                uint32_t flags = event[i].events;
                 if(nfd==m_lfd)
                 {
                     if (!acceptClient()) 
@@ -78,9 +79,9 @@ void epollServer::eventLoop()
                 }
                 else
                 {
-                    m_pool.addTask([this, nfd]()
+                    m_pool.addTask([this, nfd,flags]()
                     { 
-                    this->handClient(nfd); 
+                    this->handClient(nfd,flags); 
                     });
                 }
             }
@@ -121,55 +122,114 @@ bool epollServer::acceptClient()
     std::cout << "客户端连接成功，cfd= " << cfd << std::endl;
     return true;
 }
-bool epollServer::handClient(int fd)
+bool epollServer::handClient(int fd,uint32_t flags)
 {
-    char buf[1024];
-    int lens = recv(fd, buf, 1024, 0);
-    
-    if(lens==0)
+    if (flags & (EPOLLERR | EPOLLHUP))
     {
-        std::cout << "客户端断开了连接！" << std::endl;
-        epoll_ctl(m_epfd, EPOLL_CTL_DEL, fd, nullptr);
-        close(fd);
+        closeClient(fd);
         return false;
     }
-    else if(lens>0)
+    if (flags & EPOLLIN)
     {
-        std::cout << "客户端[ " << fd << " ]" << "说: " << std::endl;
-        std::cout.write(buf, lens);
-        if(send(fd, buf, lens, 0)==-1)
+        char buf[1024];
+        while (1)
         {
-            perror("send");
-            return false;
+            ssize_t lens = recv(fd, buf, 1024, 0);
+            if (lens == 0)
+            {
+                std::cout << "客户端["<<fd<<"]断开了连接！" << std::endl;
+                closeClient(fd);
+                return false;
+            }
+            else if(lens>0)
+            {
+                std::cout << "客户端[ " << fd << " ]" << "说: " << std::endl;
+                std::cout.write(buf, lens);
+                std::lock_guard<std::mutex> lock(m_pendingMutex);
+                m_pending[fd].append(buf, lens);
+                continue;
+            }
+            else if (errno==EAGAIN||errno==EWOULDBLOCK)
+            {
+                break;
+            }
+            else if(errno == EINTR)
+            {
+                continue;
+            }
+            else
+            {
+                perror("recv");
+                closeClient(fd);
+                return false;
+            }
+        }
+        
+    }
+    bool needWirte = false;
+    bool sendError = false;
+    {
+        std::lock_guard<std::mutex> lock(m_pendingMutex);
+
+        auto it = m_pending.find(fd);
+        if(it!=m_pending.end()&&!it->second.empty())
+        {
+            std::string &data = it->second;
+            while(!data.empty())
+            {
+                ssize_t sent = send(fd, data.data(), data.size(), MSG_NOSIGNAL);
+                if (sent > 0)
+                {
+                    // 删除已经成功提交的前 sent 字节
+                    data.erase(0, sent);
+                    continue;
+                }
+                else if(sent<0)
+                {
+                    if (errno == EINTR)
+                    {
+                        continue;
+                    }
+
+                    if (errno == EAGAIN || errno == EWOULDBLOCK)
+                    {
+                        break;
+                    }
+                    sendError = true;
+                    break;
+                }
+                if(sent==0)
+                {
+                    break;
+                }
+            }
+            if(data.empty())
+            {
+                m_pending.erase(it);
+            }
+            else
+            {
+                needWirte = true;
+            }
         }
     }
-    else
+    if(sendError)
     {
-        if (errno == EAGAIN ||errno == EWOULDBLOCK)
-        {
-            // 目前没有更多数据
-        }
-        else if (errno == EINTR)
-        {
-            // 被信号中断，本次先重新激活，稍后再尝试
-        }
-        else 
-        {
-            // 其他错误
-            perror("recv");
-            epoll_ctl(m_epfd, EPOLL_CTL_DEL, fd, nullptr);
-            close(fd);
-            return false;
-        }
+        perror("send");
+        closeClient(fd);
+        return false;
     }
     epoll_event ev{};
-    ev.events = EPOLLIN | EPOLLONESHOT;
     ev.data.fd = fd;
-
+    ev.events = EPOLLIN | EPOLLONESHOT;
+    if(needWirte)
+    {
+        ev.events |= EPOLLOUT;
+    }
     if (epoll_ctl(m_epfd, EPOLL_CTL_MOD, fd, &ev) == -1)
     {
         perror("epoll_ctl MOD");
-        close(fd);
+        closeClient(fd);
        return false;
     }
     return true;
@@ -185,4 +245,13 @@ bool epollServer::setNonBlocking(int fd)
         return false;
 
     return true;
+}
+void epollServer::closeClient(int fd)
+{
+    {
+        std::lock_guard<std::mutex> lock(m_pendingMutex);
+        m_pending.erase(fd);
+    }
+    epoll_ctl(m_epfd, EPOLL_CTL_DEL, fd, nullptr);
+    close(fd);
 }
