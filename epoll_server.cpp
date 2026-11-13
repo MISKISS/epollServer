@@ -132,6 +132,7 @@ bool epollServer::handClient(int fd,uint32_t flags)
     if (flags & EPOLLIN)
     {
         char buf[1024];
+        std::cout << "客户端[ " << fd << " ]" << "说: " << std::endl;
         while (1)
         {
             ssize_t lens = recv(fd, buf, 1024, 0);
@@ -143,7 +144,6 @@ bool epollServer::handClient(int fd,uint32_t flags)
             }
             else if(lens>0)
             {
-                std::cout << "客户端[ " << fd << " ]" << "说: " << std::endl;
                 std::cout.write(buf, lens);
                 std::lock_guard<std::mutex> lock(m_pendingMutex);
                 m_pending[fd].append(buf, lens);
