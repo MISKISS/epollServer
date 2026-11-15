@@ -131,8 +131,22 @@ bool epollServer::handClient(int fd,uint32_t flags)
     }
     if (flags & EPOLLIN)
     {
-        char buf[1024];
-        std::cout << "客户端[ " << fd << " ]" << "说: " << std::endl;
+        if(!handleRead(fd))
+        {
+            return false;
+        }
+    }
+    if(!handleWrite(fd))
+    {
+        return false;
+    }
+
+    return true;
+}
+bool epollServer::handleRead(int fd)
+{
+    char buf[1024];
+    std::cout << "客户端[ " << fd << " ]" << "说: " << std::endl;
         while (1)
         {
             ssize_t lens = recv(fd, buf, 1024, 0);
@@ -164,9 +178,10 @@ bool epollServer::handClient(int fd,uint32_t flags)
                 return false;
             }
         }
-        
-    }
-    bool needWirte = false;
+    return true;
+}
+bool epollServer::handleWrite(int fd)
+{
     bool sendError = false;
     {
         std::lock_guard<std::mutex> lock(m_pendingMutex);
@@ -203,34 +218,53 @@ bool epollServer::handClient(int fd,uint32_t flags)
                     break;
                 }
             }
-            if(data.empty())
+            if (data.empty())
             {
                 m_pending.erase(it);
             }
-            else
-            {
-                needWirte = true;
-            }
         }
     }
-    if(sendError)
+    if (sendError)
     {
         perror("send");
         closeClient(fd);
         return false;
     }
-    epoll_event ev{};
-    ev.data.fd = fd;
-    ev.events = EPOLLIN | EPOLLONESHOT;
-    if(needWirte)
+    if(!rearmClient(fd))
     {
-        ev.events |= EPOLLOUT;
+        return false;
     }
-    if (epoll_ctl(m_epfd, EPOLL_CTL_MOD, fd, &ev) == -1)
+
+    return true;
+}
+bool epollServer::rearmClient(int fd)
+{
+    bool epoll = true;
+    bool needWrite = false;
+    {
+        std::lock_guard<std::mutex> lock(m_pendingMutex);
+        auto it = m_pending.find(fd);
+        if (it!=m_pending.end() && !it->second.empty())
+        {
+            needWrite = true;
+        }
+        epoll_event ev{};
+        ev.data.fd = fd;
+        ev.events = EPOLLIN | EPOLLONESHOT;
+        if(needWrite)
+        {
+            ev.events |= EPOLLOUT;
+        }
+        if (epoll_ctl(m_epfd, EPOLL_CTL_MOD, fd, &ev) == -1)
+        {
+            epoll = false;
+        }
+    }
+    if(!epoll)
     {
         perror("epoll_ctl MOD");
         closeClient(fd);
-       return false;
+        return false;
     }
     return true;
 }
