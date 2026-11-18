@@ -11,7 +11,7 @@ public:
         Incomplete,  // 数据不完整
         Invalid      // 非法数据包
     };
-    static std::string encode(const std::string &message);
+    static std::string encode(const std::string &message);//解析
     static DecodeResult decode( std::string &buffer, std::string &message);
     static constexpr uint32_t MAX_BODY_SIZE = 64 * 1024;
 };

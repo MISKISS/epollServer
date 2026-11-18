@@ -145,8 +145,7 @@ bool epollServer::handClient(int fd,uint32_t flags)
 }
 bool epollServer::handleRead(int fd)
 {
-    char buf[1024];
-    std::cout << "客户端[ " << fd << " ]" << "说: " << std::endl;
+        char buf[1024];
         while (1)
         {
             ssize_t lens = recv(fd, buf, 1024, 0);
@@ -158,9 +157,41 @@ bool epollServer::handleRead(int fd)
             }
             else if(lens>0)
             {
+                std::string message;
                 std::cout.write(buf, lens);
-                std::lock_guard<std::mutex> lock(m_pendingMutex);
-                m_pending[fd].append(buf, lens);
+                {
+                    std::lock_guard<std::mutex> lock(m_recvBufferMutex);
+                    m_recvBuffer[fd].append(buf,lens);
+                }
+                
+                while(1)
+                {
+                    Message::DecodeResult result;
+                    {
+                        std::lock_guard<std::mutex> lock(m_recvBufferMutex);
+                        result = Message::decode(m_recvBuffer[fd],message);
+                    }
+                    if(result==Message::DecodeResult::Complete)
+                    {
+                        std::cout << "客户端[ " << fd << " ]" << "说: " << std::endl;
+                        std::string packet = Message::encode(message);
+                        std::cout.write(message.data(), message.size());
+                        std::lock_guard<std::mutex> lock(m_pendingMutex);
+                        m_pending[fd].append(packet);
+                        continue;
+                    }
+                    else if(result==Message::DecodeResult::Incomplete)
+                    {
+                        break;
+                    }
+                    else if(result==Message::DecodeResult::Invalid)
+                    {
+                        std::cout <<"客户端["<<fd<<"]"<< "发送了非法数据，已关闭" << std::endl;
+
+                        closeClient(fd);
+                        return false;
+                    }
+                }
                 continue;
             }
             else if (errno==EAGAIN||errno==EWOULDBLOCK)
@@ -285,6 +316,10 @@ void epollServer::closeClient(int fd)
     {
         std::lock_guard<std::mutex> lock(m_pendingMutex);
         m_pending.erase(fd);
+    }
+    {
+        std::lock_guard<std::mutex> lock(m_recvBufferMutex);
+        m_recvBuffer.erase(fd);
     }
     epoll_ctl(m_epfd, EPOLL_CTL_DEL, fd, nullptr);
     close(fd);
