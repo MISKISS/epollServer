@@ -138,9 +138,10 @@ bool epollServer::acceptClient()
     }
     auto conn =std::make_shared<connection>();
     conn->fd=cfd;
-    {
-    std::lock_guard<std::mutex> lock(m_connectionsMutex);
     conn->id=m_nextConnectionId.fetch_add(1);//建立connection
+    {
+        std::lock_guard<std::mutex> lock(m_connectionsMutex);
+        m_connections[conn->id]=conn;
     }
     epoll_event nev;
     nev.data.u64=conn->id;
@@ -151,7 +152,7 @@ bool epollServer::acceptClient()
         close(cfd);
         return false;
     }
-    m_connections[conn->id]=conn;
+    
     std::cout << "客户端连接成功，id= " << conn->id << std::endl;
     return true;
 }
@@ -193,28 +194,18 @@ bool epollServer::handleRead(std::shared_ptr<connection> conn)
         else if (lens > 0)
         {
             std::string message;
-            {
-                std::lock_guard<std::mutex> lock(m_recvBufferMutex);
-                m_recvBuffer[fd].append(buf, lens);
-            }
-
+            conn->m_recvBuffer.append(buf, lens);
             while (1)
             {
                 Message::DecodeResult result;
-                {
-                    std::lock_guard<std::mutex> lock(m_recvBufferMutex);
-                    result = Message::decode(m_recvBuffer[fd], message);
-                }
+                result = Message::decode(conn->m_recvBuffer, message);
                 if (result == Message::DecodeResult::Complete)
                 {
                     std::cout << "客户端[ " << conn->id << " ]" << "说: " << std::endl;
                     std::string packet = Message::encode(message);
                     std::cout.write(message.data(), message.size());
                     std::cout << std::endl;
-                    {
-                        std::lock_guard<std::mutex> lock(m_pendingMutex);
-                        m_pending[fd].append(packet);
-                    }
+                    conn->m_pending.append(packet);
                     continue;
                 }
                 else if (result == Message::DecodeResult::Incomplete)
@@ -252,13 +243,7 @@ bool epollServer::handleWrite(std::shared_ptr<connection> conn)
 {
     int fd = conn->fd;
     bool sendError = false;
-    {
-        std::lock_guard<std::mutex> lock(m_pendingMutex);
-
-        auto it = m_pending.find(fd);
-        if(it!=m_pending.end()&&!it->second.empty())
-        {
-            std::string &data = it->second;
+            std::string& data = conn->m_pending;
             while(!data.empty())
             {
                 ssize_t sent = send(fd, data.data(), data.size(), MSG_NOSIGNAL);
@@ -274,7 +259,6 @@ bool epollServer::handleWrite(std::shared_ptr<connection> conn)
                     {
                         continue;
                     }
-
                     if (errno == EAGAIN || errno == EWOULDBLOCK)
                     {
                         break;
@@ -287,12 +271,7 @@ bool epollServer::handleWrite(std::shared_ptr<connection> conn)
                     break;
                 }
             }
-            if (data.empty())
-            {
-                m_pending.erase(it);
-            }
-        }
-    }
+    
     if (sendError)
     {
         perror("send");
@@ -309,33 +288,22 @@ bool epollServer::handleWrite(std::shared_ptr<connection> conn)
 bool epollServer::rearmClient(std::shared_ptr<connection> conn)
 {
     int fd = conn->fd;
-    bool epoll = true;
-    bool needWrite = false;
+
+    epoll_event ev{};
+    ev.data.u64 = conn->id;
+    ev.events = EPOLLIN | EPOLLONESHOT;
+    if(!conn->m_pending.empty())
     {
-        std::lock_guard<std::mutex> lock(m_pendingMutex);
-        auto it = m_pending.find(fd);
-        if (it!=m_pending.end() && !it->second.empty())
-        {
-            needWrite = true;
-        }
-        epoll_event ev{};
-        ev.data.u64=conn->id;
-        ev.events = EPOLLIN | EPOLLONESHOT;
-        if(needWrite)
-        {
-            ev.events |= EPOLLOUT;
-        }
-        if (epoll_ctl(m_epfd, EPOLL_CTL_MOD, fd, &ev) == -1)
-        {
-            epoll = false;
-        }
+        ev.events |= EPOLLOUT;
     }
-    if(!epoll)
+    if (epoll_ctl(m_epfd, EPOLL_CTL_MOD, fd, &ev) == -1)
     {
-        perror("epoll_ctl MOD");
+        perror("epoll_ctl");
         closeClient(conn);
         return false;
     }
+
+    
     return true;
 }
 bool epollServer::setNonBlocking(int fd)//变成LT模式
@@ -357,19 +325,14 @@ void epollServer::closeClient(std::shared_ptr<connection> conn)
     {
         return;
     }
-    {
-        std::lock_guard<std::mutex> lock(m_pendingMutex);
-        m_pending.erase(fd);
-    }
-    {
-        std::lock_guard<std::mutex> lock(m_recvBufferMutex);
-        m_recvBuffer.erase(fd);
-    }
+    conn->m_pending.clear();
+    conn->m_recvBuffer.clear();
     {
         std::lock_guard<std::mutex> lock(m_connectionsMutex);
         m_connections.erase(conn->id);
     }
     epoll_ctl(m_epfd, EPOLL_CTL_DEL, fd, nullptr);
     close(fd);
+    conn->fd = -1;
     return;
 }
